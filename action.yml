@@ -69,7 +69,7 @@ outputs:
     description: "SARIF report path."
 runs:
   using: "docker"
-  image: "docker://ghcr.io/lavluda/gha-security-checks:__VERSION__"
+  image: "docker://ghcr.io/lavluda/gha-security-checks:0.3.0"
   args:
     - "--mode"
     - "${{ inputs.mode }}"
