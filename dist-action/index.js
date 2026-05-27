@@ -40474,7 +40474,7 @@ function notice(message, properties = {}) {
  * @param message info message
  */
 function info(message) {
-    process.stdout.write(message + os.EOL);
+    process.stdout.write(message + external_os_namespaceObject.EOL);
 }
 /**
  * Begin an output group.
@@ -44805,7 +44805,7 @@ const categorySchema = enumType([
 ]);
 const configSchema = objectType({
     root: stringType().default("."),
-    mode: enumType(["audit", "warn", "fail-on-high", "fail-on-critical", "strict", "custom"])
+    mode: enumType(["audit", "diff", "warn", "fail-on-high", "fail-on-critical", "strict", "custom"])
         .default("audit"),
     failOn: objectType({
         severity: severitySchema.default("high"),
@@ -44890,6 +44890,7 @@ const configSchema = objectType({
         annotations: booleanType().default(true)
     })
         .default({}),
+    baseline: stringType().optional(),
     suppressions: arrayType(objectType({
         id: stringType().optional(),
         category: categorySchema.optional(),
@@ -45026,6 +45027,13 @@ class ComposerAuditScanner {
         if (!hasFile(context.cwd, "composer.json")) {
             return [];
         }
+        // In diff mode, skip if no PHP manifest was changed
+        if (context.changedFiles !== undefined) {
+            const manifests = ["composer.json", "composer.lock"];
+            if (!manifests.some((m) => context.changedFiles.has(m))) {
+                return [];
+            }
+        }
         const result = await context.toolRunner.run(context.config.tools.composer, ["audit", "--format=json", "--no-interaction"], { cwd: context.cwd });
         if (result.exitCode === 127) {
             return [
@@ -45139,6 +45147,13 @@ class ComposerOutdatedScanner {
         if (!hasFile(context.cwd, "composer.json")) {
             return [];
         }
+        // In diff mode, skip if no PHP manifest was changed
+        if (context.changedFiles !== undefined) {
+            const manifests = ["composer.json", "composer.lock"];
+            if (!manifests.some((m) => context.changedFiles.has(m))) {
+                return [];
+            }
+        }
         const result = await context.toolRunner.run(context.config.tools.composer, ["outdated", "--format=json", "--no-interaction"], { cwd: context.cwd });
         if (result.exitCode === 127) {
             return [
@@ -45205,6 +45220,13 @@ class NpmAuditScanner {
         }
         if (!hasFile(context.cwd, "package.json")) {
             return [];
+        }
+        // In diff mode, skip if no Node manifest was changed
+        if (context.changedFiles !== undefined) {
+            const manifests = ["package.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml"];
+            if (!manifests.some((m) => context.changedFiles.has(m))) {
+                return [];
+            }
         }
         const result = await context.toolRunner.run(context.config.tools.npm, ["audit", "--json"], { cwd: context.cwd });
         if (result.exitCode === 127) {
@@ -45294,6 +45316,13 @@ class NpmOutdatedScanner {
         if (!hasFile(context.cwd, "package.json")) {
             return [];
         }
+        // In diff mode, skip if no Node manifest was changed
+        if (context.changedFiles !== undefined) {
+            const manifests = ["package.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml"];
+            if (!manifests.some((m) => context.changedFiles.has(m))) {
+                return [];
+            }
+        }
         const result = await context.toolRunner.run(context.config.tools.npm, ["outdated", "--json"], { cwd: context.cwd });
         if (result.exitCode === 127) {
             return [
@@ -45354,6 +45383,22 @@ class OsvScanner {
     async scan(context) {
         if (!context.config.scanners.osv) {
             return [];
+        }
+        // In diff mode, skip if no lockfile was changed
+        if (context.changedFiles !== undefined) {
+            const lockfiles = [
+                "composer.lock",
+                "package-lock.json",
+                "yarn.lock",
+                "pnpm-lock.yaml",
+                "Pipfile.lock",
+                "Gemfile.lock",
+                "go.sum",
+                "Cargo.lock"
+            ];
+            if (!lockfiles.some((f) => context.changedFiles.has(f))) {
+                return [];
+            }
         }
         const result = await context.toolRunner.run(context.config.tools.osvScanner, ["scan", "source", "--format=json", "--recursive", context.cwd], { cwd: context.cwd });
         if (result.exitCode === 127) {
@@ -45453,11 +45498,15 @@ class SecretScanner {
             ...pattern,
             expression: new RegExp(pattern.regex, "gi")
         }));
-        const files = listFiles({
+        const allFiles = listFiles({
             root: context.cwd,
             exclude: context.config.secrets.exclude,
             maxFileBytes: context.config.secrets.maxFileBytes
         });
+        // In diff mode, only scan files that were changed
+        const files = context.changedFiles !== undefined
+            ? allFiles.filter((f) => context.changedFiles.has(f))
+            : allFiles;
         const findings = [];
         for (const file of files) {
             if (isExplicitSecretFile(file)) {
@@ -45547,7 +45596,11 @@ class WorkflowHardeningScanner {
         if (!context.config.scanners.githubActions) {
             return [];
         }
-        const files = listWorkflowFiles(context.cwd, context.config.githubActions.workflowDir);
+        const allFiles = listWorkflowFiles(context.cwd, context.config.githubActions.workflowDir);
+        // In diff mode, only check workflow files that were changed
+        const files = context.changedFiles !== undefined
+            ? allFiles.filter((f) => context.changedFiles.has(f))
+            : allFiles;
         const findings = [];
         for (const file of files) {
             const raw = (0,external_node_fs_namespaceObject.readFileSync)((0,external_node_path_namespaceObject.join)(context.cwd, file), "utf8");
@@ -45757,7 +45810,7 @@ function createSummary(findings) {
 ;// CONCATENATED MODULE: ./src/core/policy-engine.ts
 
 function evaluatePolicy(findings, config) {
-    if (config.mode === "audit" || config.mode === "warn") {
+    if (config.mode === "audit" || config.mode === "warn" || config.mode === "diff") {
         return { failed: false, blockingFindings: [] };
     }
     const blockingFindings = findings.filter((finding) => {
@@ -45789,7 +45842,58 @@ function evaluatePolicy(findings, config) {
     };
 }
 
+;// CONCATENATED MODULE: ./src/core/baseline.ts
+
+
+/**
+ * Loads the baseline file and returns a Set of suppressed finding IDs.
+ * Returns an empty Set if the file doesn't exist or can't be parsed.
+ */
+function loadBaseline(cwd, baselinePath) {
+    const full = (0,external_node_path_namespaceObject.resolve)(cwd, baselinePath);
+    if (!(0,external_node_fs_namespaceObject.existsSync)(full))
+        return new Set();
+    try {
+        const parsed = JSON.parse((0,external_node_fs_namespaceObject.readFileSync)(full, "utf8"));
+        if (!Array.isArray(parsed))
+            return new Set();
+        return new Set(parsed.map((entry) => entry.id));
+    }
+    catch {
+        return new Set();
+    }
+}
+/**
+ * Writes all open findings to the baseline file.
+ * On subsequent runs, these findings will be suppressed.
+ */
+function saveBaseline(cwd, baselinePath, findings) {
+    const full = resolve(cwd, baselinePath);
+    const now = new Date().toISOString();
+    const entries = findings
+        .filter((f) => f.status === "open")
+        .map((f) => ({
+        id: f.id,
+        title: f.title,
+        suppressedAt: now
+    }));
+    writeFileSync(full, `${JSON.stringify(entries, null, 2)}\n`, "utf8");
+}
+/**
+ * Marks findings whose ID is present in the baseline as suppressed.
+ */
+function applyBaseline(findings, baselineIds) {
+    return findings.map((f) => baselineIds.has(f.id)
+        ? {
+            ...f,
+            status: "suppressed",
+            metadata: { ...f.metadata, baselined: true }
+        }
+        : f);
+}
+
 ;// CONCATENATED MODULE: ./src/core/scanner-engine.ts
+
 
 
 class ScannerEngine {
@@ -45798,13 +45902,13 @@ class ScannerEngine {
         this.scanners = scanners;
     }
     async run(context) {
-        const findings = [];
+        const rawFindings = [];
         for (const scanner of this.scanners) {
             try {
-                findings.push(...(await scanner.scan(context)));
+                rawFindings.push(...(await scanner.scan(context)));
             }
             catch (error) {
-                findings.push({
+                rawFindings.push({
                     id: `tooling.${scanner.name}.failed`,
                     title: `${scanner.name} failed`,
                     description: error instanceof Error ? error.message : String(error),
@@ -45815,6 +45919,10 @@ class ScannerEngine {
                 });
             }
         }
+        // Apply baseline suppression when configured
+        const findings = context.config.baseline
+            ? applyBaseline(rawFindings, loadBaseline(context.cwd, context.config.baseline))
+            : rawFindings;
         const decision = evaluatePolicy(findings, context.config);
         return {
             findings,
@@ -45995,6 +46103,51 @@ function ensureParent(path) {
 
 ;// CONCATENATED MODULE: external "node:child_process"
 const external_node_child_process_namespaceObject = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("node:child_process");
+;// CONCATENATED MODULE: external "node:process"
+const external_node_process_namespaceObject = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("node:process");
+;// CONCATENATED MODULE: ./src/core/diff.ts
+
+
+/**
+ * Resolves the set of files changed vs the PR base (or origin/main).
+ * Returns undefined if git is unavailable — callers should fall back to a full scan.
+ */
+function getChangedFiles(cwd) {
+    try {
+        let base;
+        const baseRef = external_node_process_namespaceObject.env.GITHUB_BASE_REF;
+        if (baseRef) {
+            // Inside a GitHub Actions pull_request event
+            base = `origin/${baseRef}`;
+        }
+        else {
+            // Local dev — find the common ancestor with origin/main
+            base = (0,external_node_child_process_namespaceObject.execSync)("git merge-base HEAD origin/main", {
+                cwd,
+                stdio: ["ignore", "pipe", "ignore"]
+            })
+                .toString()
+                .trim();
+        }
+        const output = (0,external_node_child_process_namespaceObject.execSync)(`git diff --name-only "${base}"...HEAD`, {
+            cwd,
+            stdio: ["ignore", "pipe", "ignore"]
+        })
+            .toString()
+            .trim();
+        if (!output)
+            return new Set();
+        return new Set(output
+            .split("\n")
+            .map((f) => f.trim())
+            .filter(Boolean));
+    }
+    catch {
+        // git not available or repo not initialised — fall back to full scan
+        return undefined;
+    }
+}
+
 ;// CONCATENATED MODULE: ./src/integrations/tool-runner.ts
 
 class ChildProcessToolRunner {
@@ -46038,6 +46191,7 @@ class ChildProcessToolRunner {
 
 
 
+
 async function runSecurityCheck(options = {}) {
     const cwd = (0,external_node_path_namespaceObject.resolve)(options.cwd ?? process.cwd());
     const config = loadConfig({
@@ -46049,14 +46203,20 @@ async function runSecurityCheck(options = {}) {
         }
     });
     const engine = new ScannerEngine(createScanners(config));
+    // In diff mode, resolve changed files so scanners can limit their scope
+    const changedFiles = config.mode === "diff" ? getChangedFiles(cwd) : undefined;
     const result = await engine.run({
         cwd,
         config,
-        toolRunner: options.toolRunner ?? new ChildProcessToolRunner()
+        toolRunner: options.toolRunner ?? new ChildProcessToolRunner(),
+        changedFiles
     });
     const reports = options.writeReports === false ? {} : writeConfiguredReports(result, config, cwd);
     return { config, result, reports };
 }
+
+
+
 
 
 
@@ -46945,7 +47105,7 @@ class RequestError extends Error {
 
 
 // pkg/dist-src/version.js
-var dist_bundle_VERSION = "10.0.9";
+var dist_bundle_VERSION = "10.0.10";
 
 // pkg/dist-src/defaults.js
 var defaults_default = {
@@ -50384,6 +50544,10 @@ function getOctokit(token, options, ...additionalPlugins) {
 
 
 const prCommentMarker = "<!-- gha-security-checks-report -->";
+// Embedded JSON storing the previous run's finding IDs for delta computation
+const idDataPrefix = "<!-- gha-security-checks-ids:";
+const idDataSuffix = " -->";
+const maxCommentBytes = 60_000;
 async function publishGitHubReport(result, options) {
     if (options.annotations) {
         annotateFindings(result.findings, result.failed);
@@ -50402,7 +50566,7 @@ async function publishGitHubReport(result, options) {
     const owner = github_context.repo.owner;
     const repo = github_context.repo.repo;
     const issueNumber = pullRequest.number;
-    const body = `${prCommentMarker}\n${renderMarkdownReport(result)}`;
+    // Find existing comment
     const comments = await octokit.rest.issues.listComments({
         owner,
         repo,
@@ -50410,6 +50574,10 @@ async function publishGitHubReport(result, options) {
         per_page: 100
     });
     const existing = comments.data.find((comment) => comment.body?.includes(prCommentMarker));
+    // Extract previous finding IDs for delta computation
+    const previousIds = extractPreviousIds(existing?.body);
+    const currentIds = new Set(result.findings.filter((f) => f.status === "open").map((f) => f.id));
+    const body = buildDeltaComment(result, previousIds, currentIds);
     if (existing) {
         await octokit.rest.issues.updateComment({
             owner,
@@ -50426,8 +50594,129 @@ async function publishGitHubReport(result, options) {
         body
     });
 }
+function buildDeltaComment(result, previousIds, currentIds) {
+    const openFindings = result.findings.filter((f) => f.status === "open");
+    const newIds = [...currentIds].filter((id) => !previousIds.has(id));
+    const fixedIds = [...previousIds].filter((id) => !currentIds.has(id));
+    const stillOpenIds = [...currentIds].filter((id) => previousIds.has(id));
+    const newFindings = openFindings.filter((f) => newIds.includes(f.id));
+    const stillOpen = openFindings.filter((f) => stillOpenIds.includes(f.id));
+    const isFirstRun = previousIds.size === 0;
+    const lines = [
+        prCommentMarker,
+        "# Security Audit Report",
+        "",
+        `**Mode:** ${result.mode} · **Status:** ${result.failed ? "❌ failed" : "✅ passed"} · **Total findings:** ${result.summary.total}`,
+        ""
+    ];
+    // New findings (always expanded)
+    if (newFindings.length > 0) {
+        lines.push(`## 🆕 New (${newFindings.length})`);
+        lines.push("");
+        for (const f of newFindings) {
+            lines.push(...renderFindingLine(f));
+        }
+    }
+    else if (!isFirstRun) {
+        lines.push("## 🆕 New");
+        lines.push("");
+        lines.push("No new findings introduced in this PR. ✅");
+        lines.push("");
+    }
+    // Fixed findings
+    if (fixedIds.length > 0 && !isFirstRun) {
+        lines.push(`<details><summary>✅ Fixed since last run (${fixedIds.length})</summary>`);
+        lines.push("");
+        for (const id of fixedIds) {
+            lines.push(`- ~~\`${id}\`~~`);
+        }
+        lines.push("");
+        lines.push("</details>");
+        lines.push("");
+    }
+    // Still open (collapsed by default)
+    if (stillOpen.length > 0) {
+        lines.push(`<details><summary>⚠️ Still open from before this PR (${stillOpen.length})</summary>`);
+        lines.push("");
+        for (const f of stillOpen) {
+            lines.push(...renderFindingLine(f));
+        }
+        lines.push("</details>");
+        lines.push("");
+    }
+    // First run: show everything
+    if (isFirstRun && openFindings.length > 0) {
+        lines.push(`## Findings (${openFindings.length})`);
+        lines.push("");
+        for (const f of openFindings) {
+            lines.push(...renderFindingLine(f));
+        }
+    }
+    if (result.findings.filter((f) => f.status === "suppressed").length > 0) {
+        const baselined = result.findings.filter((f) => f.status === "suppressed" && f.metadata?.baselined).length;
+        if (baselined > 0) {
+            lines.push(`<details><summary>🔕 Baselined / suppressed (${baselined})</summary>`);
+            lines.push("");
+            lines.push("These findings were present when the baseline was created and are not shown.");
+            lines.push("");
+            lines.push("</details>");
+            lines.push("");
+        }
+    }
+    // Embed current IDs for next run's delta
+    const idsJson = JSON.stringify([...currentIds]);
+    lines.push(`${idDataPrefix}${idsJson}${idDataSuffix}`);
+    const body = lines.join("\n");
+    // Truncate if over GitHub's limit
+    if (Buffer.byteLength(body, "utf8") > maxCommentBytes) {
+        const truncated = [
+            prCommentMarker,
+            "# Security Audit Report",
+            "",
+            `**Mode:** ${result.mode} · **Status:** ${result.failed ? "❌ failed" : "✅ passed"} · **Total findings:** ${result.summary.total}`,
+            "",
+            "> ⚠️ Full report truncated (exceeded 60KB). See the [job summary]($SUMMARY_URL) for details.",
+            "",
+            `${idDataPrefix}${idsJson}${idDataSuffix}`
+        ].join("\n");
+        return truncated;
+    }
+    return body;
+}
+function renderFindingLine(finding) {
+    const sev = finding.severity.toUpperCase();
+    const loc = finding.location
+        ? ` — \`${finding.location.file}${finding.location.startLine ? `:${finding.location.startLine}` : ""}\``
+        : "";
+    const pkg = finding.packageName ? ` (\`${finding.packageName}\`)` : "";
+    return [
+        `- **[${sev}]** ${finding.title}${pkg}${loc}`,
+        `  ${finding.description}`,
+        ""
+    ];
+}
+function extractPreviousIds(body) {
+    if (!body)
+        return new Set();
+    const start = body.indexOf(idDataPrefix);
+    if (start === -1)
+        return new Set();
+    const end = body.indexOf(idDataSuffix, start + idDataPrefix.length);
+    if (end === -1)
+        return new Set();
+    try {
+        const json = body.slice(start + idDataPrefix.length, end);
+        const parsed = JSON.parse(json);
+        return new Set(parsed);
+    }
+    catch {
+        return new Set();
+    }
+}
 function annotateFindings(findings, useErrorAnnotations) {
     for (const finding of findings) {
+        if (finding.status !== "open")
+            continue;
         const annotation = finding.location
             ? {
                 file: finding.location.file,
@@ -50452,11 +50741,20 @@ function annotateFindings(findings, useErrorAnnotations) {
     }
 }
 
+;// CONCATENATED MODULE: ./src/core/version.ts
+// AUTO-GENERATED by scripts/generate-version.mjs — do not edit by hand.
+// Regenerated on every build via the "prebuild" npm script.
+const core_version_VERSION = "0.4.0";
+const COMMIT = "0401239";
+const BUILD_DATE = "2026-05-27T09:48:28.186Z";
+
 ;// CONCATENATED MODULE: ./src/action/main.ts
 
 
 
+
 async function main() {
+    info(`[gha-security-checks] v${core_version_VERSION} (${COMMIT})`);
     const args = parseArgs(process.argv.slice(2));
     const mode = input("mode", args);
     const configPath = input("config", args);
