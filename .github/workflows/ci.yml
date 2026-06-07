@@ -23,6 +23,8 @@ jobs:
       - run: npm run lint
       - run: npm run check
       - run: npm run test
+      - name: Verify npm package contents
+        run: npm run build && npm pack --dry-run
 
   action-yml-guard:
     name: Verify action.yml uses __VERSION__ placeholder

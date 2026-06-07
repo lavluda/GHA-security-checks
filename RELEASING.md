@@ -5,9 +5,32 @@ This document describes how to cut a new release of `gha-security-checks`.
 ## Prerequisites
 
 - Push access to the `main` branch and the ability to push tags.
-- `NPM_TOKEN` secret set in the repository settings (Settings → Secrets → Actions).  
-  The token must have publish access to the `gha-security-checks` npm package.
+- Trusted publishing configured for the package on npmjs.com:
+  - Provider: GitHub Actions
+  - Organization or user: `lavluda`
+  - Repository: `GHA-security-checks`
+  - Workflow filename: `release.yml`
+  - Allowed action: `npm publish`
 - `GITHUB_TOKEN` is provided automatically by GitHub Actions; no extra setup needed.
+
+The package must already exist on npm before its trusted publisher can be configured. For the
+first release only, authenticate locally with a granular access token that has package write
+access and Bypass 2FA enabled, then bootstrap the package:
+
+```bash
+npm login
+npm run build
+npm publish --access public
+```
+
+Then configure the trusted publisher fields above before pushing another release tag. Future
+publishes use short-lived OIDC credentials and do not require an `NPM_TOKEN` secret.
+
+After trusted publishing is working:
+
+1. Revoke the bootstrap granular access token.
+2. Delete the `NPM_TOKEN` GitHub Actions secret, if one was created.
+3. In the package's npm settings, select **Require two-factor authentication and disallow tokens**.
 
 ## Step-by-step
 
@@ -62,8 +85,9 @@ The `release.yml` workflow now runs automatically and:
 5. Builds and pushes a multi-arch image to GHCR:
    - `ghcr.io/lavluda/gha-security-checks:X.Y.Z`
    - `ghcr.io/lavluda/gha-security-checks:latest`
-6. Publishes the npm package.
-7. Creates a GitHub release with generated notes.
+6. Publishes the npm package using npm trusted publishing with OIDC.
+7. Verifies the exact published version and runs its CLI from npm.
+8. Creates a GitHub release with generated notes.
 
 ### 5. Verify
 
