@@ -9,7 +9,7 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { existsSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { resolve, join } from "node:path";
 import { tmpdir } from "node:os";
 import { mkdtemp, cp } from "node:fs/promises";
@@ -149,5 +149,69 @@ describe("CLI — version flag", () => {
     expect(status).toBe(0);
     // Should print something like "0.3.0 (abc1234)"
     expect(stdout).toMatch(/\d+\.\d+\.\d+/);
+  });
+});
+
+// ─── baseline & suppressions (regressions) ───────────────────────────────────
+
+describe("CLI: baseline and suppressions", () => {
+  async function project(): Promise<string> {
+    const dir = await mkdtemp(join(tmpdir(), "gha-e2e-baseline-"));
+    writeFileSync(join(dir, ".env"), "TOKEN=abc\n");
+    return dir;
+  }
+
+  function cli(dir: string, args: string[]) {
+    const result = spawnSync("node", [cliPath, ...args, "--cwd", dir], {
+      encoding: "utf8",
+      timeout: 30_000,
+      env: { ...process.env, NO_COLOR: "1" }
+    });
+    return { status: result.status, stdout: result.stdout, stderr: result.stderr };
+  }
+
+  const baselineIds = (dir: string): string[] =>
+    (JSON.parse(readFileSync(join(dir, "security-baseline.json"), "utf8")) as Array<{ id: string }>).map(
+      (entry) => entry.id
+    );
+
+  it("baseline update keeps previously baselined findings when run again", async () => {
+    const dir = await project();
+    writeFileSync(join(dir, "gha-security-checks.yml"), "baseline: security-baseline.json\n");
+
+    expect(cli(dir, ["baseline", "update"]).status).toBe(0);
+    expect(baselineIds(dir)).toContain("secret.file..env");
+
+    expect(cli(dir, ["baseline", "update"]).status).toBe(0);
+    expect(baselineIds(dir)).toContain("secret.file..env");
+  });
+
+  it("baseline update writes to the config's baseline path by default", async () => {
+    const dir = await project();
+    writeFileSync(join(dir, "gha-security-checks.yml"), "baseline: custom-baseline.json\n");
+    cli(dir, ["baseline", "update"]);
+    expect(existsSync(join(dir, "custom-baseline.json"))).toBe(true);
+  });
+
+  it("a baselined finding no longer fails strict mode", async () => {
+    const dir = await project();
+    expect(cli(dir, ["--mode", "strict", "--no-json", "--no-markdown", "--no-sarif"]).status).toBe(1);
+
+    writeFileSync(join(dir, "gha-security-checks.yml"), "baseline: security-baseline.json\n");
+    cli(dir, ["baseline", "update"]);
+    expect(cli(dir, ["--mode", "strict", "--no-json", "--no-markdown", "--no-sarif"]).status).toBe(0);
+  });
+
+  it("configured suppressions (added via the CLI) are applied during the scan", async () => {
+    const dir = await project();
+    const added = cli(dir, ["suppress", "secret.file..env", "--reason", "local dev file"]);
+    expect(added.status).toBe(0);
+    expect(cli(dir, ["--mode", "strict", "--no-json", "--no-markdown", "--no-sarif"]).status).toBe(0);
+  });
+
+  it("the suppress alias supports --category", async () => {
+    const dir = await project();
+    expect(cli(dir, ["suppress", "ignored", "--category", "secret"]).status).toBe(0);
+    expect(cli(dir, ["--mode", "strict", "--no-json", "--no-markdown", "--no-sarif"]).status).toBe(0);
   });
 });

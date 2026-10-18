@@ -102,7 +102,6 @@ describe("baseline integration via ScannerEngine", () => {
     // Import at module level to avoid circular issues
     const { loadConfig } = await import("../src/core/config.js");
     const { ScannerEngine } = await import("../src/core/scanner-engine.js");
-    const { ToolRunner } = await import("../src/integrations/tool-runner.js");
 
     const config = loadConfig({
       cwd,

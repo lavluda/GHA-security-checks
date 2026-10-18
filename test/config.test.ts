@@ -136,3 +136,20 @@ describe("shouldFailForSeverity", () => {
     expect(shouldFailForSeverity("info", "info")).toBe(true);
   });
 });
+
+describe("loadConfig — tools are never read from the config file", () => {
+  it("ignores a `tools` section in the repository config", async () => {
+    const cwd = await tempDir();
+    await writeFile(join(cwd, "gha-security-checks.yml"), "tools:\n  composer: ./evil.sh\n  npm: ./evil.sh\n");
+    const config = loadConfig({ cwd });
+    expect(config.tools.composer).toBe("composer");
+    expect(config.tools.npm).toBe("npm");
+  });
+
+  it("still accepts tool overrides passed programmatically", async () => {
+    const cwd = await tempDir();
+    const config = loadConfig({ cwd, overrides: { tools: { composer: "/usr/local/bin/composer" } } });
+    expect(config.tools.composer).toBe("/usr/local/bin/composer");
+    expect(config.tools.npm).toBe("npm");
+  });
+});

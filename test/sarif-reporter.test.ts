@@ -165,3 +165,58 @@ describe("writeSarifReport", () => {
     expect(raw.endsWith("\n")).toBe(true);
   });
 });
+
+describe("toSarif — rules and GitHub compatibility", () => {
+  const findingBase = {
+    description: "d",
+    category: "secret" as const,
+    scanner: "s",
+    status: "open" as const,
+    location: { file: "a.txt", startLine: 3 }
+  };
+
+  const result = {
+    findings: [
+      { ...findingBase, id: "secret.pattern.aws.a.txt.abc", ruleId: "secret.pattern.aws", title: "AWS key", severity: "high" as const },
+      { ...findingBase, id: "secret.pattern.aws.b.txt.def", ruleId: "secret.pattern.aws", title: "AWS key", severity: "high" as const },
+      {
+        ...findingBase,
+        id: "secret.pattern.gh.a.txt.123",
+        ruleId: "secret.pattern.gh",
+        title: "GitHub token",
+        severity: "critical" as const,
+        status: "suppressed" as const,
+        metadata: { suppressionReason: "test fixture" }
+      }
+    ],
+    summary: { total: 3, bySeverity: { info: 0, low: 0, medium: 0, high: 2, critical: 1 }, byCategory: { vulnerability: 0, "outdated-dependency": 0, secret: 3, "workflow-risk": 0, configuration: 0, tooling: 0 } },
+    failed: false,
+    mode: "audit",
+    generatedAt: "2026-01-01T00:00:00.000Z"
+  };
+
+  it("groups instances of the same check under one rule", () => {
+    const run = toSarif(result).runs[0]!;
+    expect(run.tool.driver.rules.map((r) => r.id)).toEqual(["secret.pattern.aws", "secret.pattern.gh"]);
+    expect(run.results.map((r) => r.ruleId)).toEqual([
+      "secret.pattern.aws",
+      "secret.pattern.aws",
+      "secret.pattern.gh"
+    ]);
+  });
+
+  it("exposes security-severity, a repo-root base id and stable fingerprints", () => {
+    const run = toSarif(result).runs[0]!;
+    expect(run.tool.driver.rules[0]?.properties["security-severity"]).toBe("8.0");
+    expect(run.tool.driver.rules[1]?.properties["security-severity"]).toBe("9.5");
+    expect(run.results[0]?.locations?.[0]?.physicalLocation.artifactLocation.uriBaseId).toBe("%SRCROOT%");
+    expect(run.results[0]?.partialFingerprints["ghaSecurityChecks/findingId"]).toBe("secret.pattern.aws.a.txt.abc");
+    expect(run.tool.driver.informationUri).toBe("https://github.com/lavluda/GHA-security-checks");
+  });
+
+  it("marks suppressed results so GitHub does not reopen them", () => {
+    const run = toSarif(result).runs[0]!;
+    expect(run.results[0]?.suppressions).toBeUndefined();
+    expect(run.results[2]?.suppressions).toEqual([{ kind: "external", justification: "test fixture" }]);
+  });
+});
