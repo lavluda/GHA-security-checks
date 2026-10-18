@@ -23,8 +23,9 @@
     "precheck": "node scripts/generate-version.mjs",
     "check": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
     "lint": "eslint .",
-    "prepare:action": "ncc build src/action/main.ts -o dist-action --source-map --license licenses.txt"
+    "prepare:action": "ncc build dist/action/main.js -o dist-action --source-map --license licenses.txt"
   },
   "keywords": [
     "github-actions",
@@ -50,19 +51,20 @@
   },
   "dependencies": {
     "@actions/core": "^3.0.1",
-    "@actions/exec": "^1.1.1",
+    "@actions/exec": "^3.0.0",
     "@actions/github": "^9.1.1",
-    "commander": "^12.1.0",
-    "yaml": "^2.8.0",
-    "zod": "^3.25.0"
+    "commander": "^15.0.0",
+    "yaml": "^2.9.1",
+    "zod": "^4.6.7"
   },
   "devDependencies": {
-    "@eslint/js": "^9.28.0",
-    "@types/node": "^24.0.0",
-    "@vercel/ncc": "^0.38.3",
-    "eslint": "^9.28.0",
-    "typescript": "^5.8.0",
-    "vitest": "^3.2.0"
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^26.6.5",
+    "@vercel/ncc": "^0.45.0",
+    "@vitest/coverage-v8": "^5.0.5",
+    "eslint": "^10.13.0",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.5"
   },
   "engines": {
     "node": ">=24"
