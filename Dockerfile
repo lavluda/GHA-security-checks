@@ -1,4 +1,4 @@
-ARG OSV_SCANNER_VERSION=v2.2.4
+ARG OSV_SCANNER_VERSION=v2.7.0
 
 # Pin base images by digest for reproducible builds.
 # To refresh digests run:
@@ -12,7 +12,7 @@ FROM composer@sha256:b09bccd91a78fe8a9ab4b33d707b862e8fe54fec17782e32683ad2a69c4
 FROM node@sha256:242549cd46785b480c832479a730f4f2a20865d61ea2e404fdb2a5c3d3b73ecf AS build
 WORKDIR /app
 COPY package*.json tsconfig.json ./
-RUN npm install
+RUN npm ci
 COPY scripts ./scripts
 COPY src ./src
 RUN npm run build
@@ -30,12 +30,17 @@ RUN set -eux; \
   esac; \
   apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates curl git php-cli unzip \
-  && curl -fsSL "https://github.com/google/osv-scanner/releases/download/${OSV_SCANNER_VERSION}/osv-scanner_linux_${osv_arch}" -o /usr/local/bin/osv-scanner \
-  && chmod +x /usr/local/bin/osv-scanner \
+  && osv_base="https://github.com/google/osv-scanner/releases/download/${OSV_SCANNER_VERSION}" \
+  && mkdir -p /tmp/osv \
+  && curl -fsSL "${osv_base}/osv-scanner_linux_${osv_arch}" -o "/tmp/osv/osv-scanner_linux_${osv_arch}" \
+  && curl -fsSL "${osv_base}/osv-scanner_SHA256SUMS" -o /tmp/osv/osv-scanner_SHA256SUMS \
+  && (cd /tmp/osv && grep " osv-scanner_linux_${osv_arch}\$" osv-scanner_SHA256SUMS | sha256sum -c -) \
+  && install -m 0755 "/tmp/osv/osv-scanner_linux_${osv_arch}" /usr/local/bin/osv-scanner \
+  && rm -rf /tmp/osv \
   && apt-get clean \
   && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY package*.json ./
-RUN npm install --omit=dev
+RUN npm ci --omit=dev
 COPY --from=build /app/dist ./dist
 ENTRYPOINT ["node", "/app/dist/action/main.js"]

@@ -1,9 +1,12 @@
-name: "GHA Security Checks Docker"
-description: "Container action for reusable security audit checks."
+name: "GHA Security Checks"
+description: "Reusable security audit checks for PHP Composer, secrets, vulnerabilities, and workflow risks."
 author: "lavluda"
+branding:
+  icon: "shield"
+  color: "green"
 inputs:
   mode:
-    description: "Policy mode: audit, warn, fail-on-high, fail-on-critical, strict, or custom."
+    description: "Policy mode: audit, diff, warn, fail-on-high, fail-on-critical, strict, or custom."
     required: false
     default: "audit"
   config:
@@ -66,7 +69,7 @@ outputs:
     description: "SARIF report path."
 runs:
   using: "docker"
-  image: "docker://ghcr.io/lavluda/gha-security-checks:0.2.0"
+  image: "docker://ghcr.io/lavluda/gha-security-checks:__VERSION__"
   args:
     - "--mode"
     - "${{ inputs.mode }}"

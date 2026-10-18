@@ -74,5 +74,5 @@ outputs:
     description: "SARIF report path."
 
 runs:
-  using: "node20"
+  using: "node24"
   main: "../dist-action/index.js"

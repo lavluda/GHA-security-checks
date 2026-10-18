@@ -80,21 +80,22 @@ The `release.yml` workflow now runs automatically and:
 
 1. Verifies the tag version matches `package.json`.
 2. Runs lint + typecheck + tests.
-3. Substitutes `__VERSION__` in `action.yml` with `X.Y.Z`.
-4. Commits the substituted `action.yml` and force-moves the tag to that commit.
-5. Builds and pushes a multi-arch image to GHCR:
+3. Builds and pushes a multi-arch image to GHCR:
    - `ghcr.io/lavluda/gha-security-checks:X.Y.Z`
    - `ghcr.io/lavluda/gha-security-checks:latest`
-6. Publishes the npm package using npm trusted publishing with OIDC.
-7. Verifies the exact published version and runs its CLI from npm.
-8. Creates a GitHub release with generated notes.
+4. Substitutes `__VERSION__` in `action.yml` and `docker/action.yml` with `X.Y.Z@sha256:<digest>` of the pushed image.
+5. Commits the substituted manifests and force-moves the tag to that commit.
+6. Builds the JS action bundle, commits it, and re-points the tag.
+7. Publishes the npm package using npm trusted publishing with OIDC.
+8. Verifies the exact published version and runs its CLI from npm.
+9. Creates a GitHub release with generated notes.
 
 ### 5. Verify
 
 - [ ] `ghcr.io/lavluda/gha-security-checks:X.Y.Z` is visible in the GitHub Container Registry.
 - [ ] `npm info gha-security-checks version` returns `X.Y.Z`.
 - [ ] The GitHub release page is populated.
-- [ ] `action.yml` on the `vX.Y.Z` tag references `:X.Y.Z` (not `__VERSION__`).
+- [ ] `action.yml` and `docker/action.yml` on the `vX.Y.Z` tag reference `:X.Y.Z@sha256:...` (not `__VERSION__`).
 
 ## Rollback
 
