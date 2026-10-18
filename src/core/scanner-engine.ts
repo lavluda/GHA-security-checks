@@ -1,13 +1,14 @@
-import { createSummary, type ScanResult } from "./finding.js";
+import { createSummary, type Finding, type ScanResult } from "./finding.js";
 import { evaluatePolicy } from "./policy-engine.js";
 import { loadBaseline, applyBaseline } from "./baseline.js";
+import { applySuppressions } from "./suppressions.js";
 import type { Scanner, ScannerContext } from "./scanner.js";
 
 export class ScannerEngine {
   constructor(private readonly scanners: Scanner[]) {}
 
   async run(context: ScannerContext): Promise<ScanResult> {
-    const rawFindings = [];
+    const rawFindings: Finding[] = [];
 
     for (const scanner of this.scanners) {
       try {
@@ -17,18 +18,18 @@ export class ScannerEngine {
           id: `tooling.${scanner.name}.failed`,
           title: `${scanner.name} failed`,
           description: error instanceof Error ? error.message : String(error),
-          category: "tooling" as const,
-          severity: "info" as const,
+          category: "tooling",
+          severity: "info",
           scanner: scanner.name,
-          status: "skipped" as const
+          status: "skipped"
         });
       }
     }
 
-    // Apply baseline suppression when configured
-    const findings = context.config.baseline
+    const baselined = context.config.baseline
       ? applyBaseline(rawFindings, loadBaseline(context.cwd, context.config.baseline))
       : rawFindings;
+    const findings = applySuppressions(baselined, context.config.suppressions);
 
     const decision = evaluatePolicy(findings, context.config);
 

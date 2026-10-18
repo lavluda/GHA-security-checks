@@ -1,6 +1,8 @@
 import { hasFile } from "../../core/filesystem.js";
 import type { Finding } from "../../core/finding.js";
+import { parseJson } from "../../core/json.js";
 import type { Scanner, ScannerContext } from "../../core/scanner.js";
+import { toolUnavailableFinding, unparsableOutputFinding } from "../../core/tooling.js";
 
 interface ComposerAuditAdvisory {
   advisoryId?: string;
@@ -40,39 +42,29 @@ export class ComposerAuditScanner implements Scanner {
       }
     }
 
-    const result = await context.toolRunner.run(
-      context.config.tools.composer,
-      ["audit", "--format=json", "--no-interaction"],
-      { cwd: context.cwd }
-    );
+    // Without --locked Composer audits the installed vendor/ directory, which is empty on a fresh checkout.
+    const args = ["audit", "--format=json", "--no-interaction"];
+    if (hasFile(context.cwd, "composer.lock")) {
+      args.push("--locked");
+    }
 
-    if (result.exitCode === 127) {
-      return [
-        {
-          id: "tooling.composer.missing",
-          title: "Composer is not available",
-          description: "Composer audit was skipped because the configured composer command was not found.",
-          category: "tooling",
-          severity: "info",
-          scanner: this.name,
-          status: "skipped"
-        }
-      ];
+    const result = await context.toolRunner.run(context.config.tools.composer, args, {
+      cwd: context.cwd
+    });
+
+    const unavailable = toolUnavailableFinding(
+      this.name,
+      "tooling.composer.audit",
+      "Composer audit",
+      result
+    );
+    if (unavailable) {
+      return [unavailable];
     }
 
     const parsed = parseJson<ComposerAuditJson>(result.stdout);
     if (!parsed) {
-      return [
-        {
-          id: "tooling.composer.audit.parse-failed",
-          title: "Composer audit output could not be parsed",
-          description: result.stderr || "Composer did not return valid JSON output.",
-          category: "tooling",
-          severity: "info",
-          scanner: this.name,
-          status: "skipped"
-        }
-      ];
+      return [unparsableOutputFinding(this.name, "tooling.composer.audit", "Composer audit", result)];
     }
 
     const findings: Finding[] = [];
@@ -82,6 +74,7 @@ export class ComposerAuditScanner implements Scanner {
         const advisoryId = advisory.advisoryId ?? advisory.advisory_id ?? advisory.cve ?? packageName;
         findings.push({
           id: `composer.audit.${packageName}.${advisoryId}`,
+          ruleId: `composer.audit.${advisoryId}`,
           title: advisory.title ?? `Vulnerability in ${packageName}`,
           description: buildDescription(packageName, advisory),
           category: "vulnerability",
@@ -105,6 +98,7 @@ export class ComposerAuditScanner implements Scanner {
       for (const [packageName, replacement] of Object.entries(parsed.abandoned ?? {})) {
         findings.push({
           id: `composer.abandoned.${packageName}`,
+          ruleId: "composer.abandoned",
           title: `Abandoned Composer package: ${packageName}`,
           description:
             typeof replacement === "string" && replacement.length > 0
@@ -147,12 +141,4 @@ function normalizeSeverity(value?: string): Finding["severity"] {
     return normalized;
   }
   return "medium";
-}
-
-function parseJson<T>(value: string): T | undefined {
-  try {
-    return JSON.parse(value) as T;
-  } catch {
-    return undefined;
-  }
 }

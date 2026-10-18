@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import YAML from "yaml";
 import { z } from "zod";
-import type { FindingCategory, FindingSeverity } from "./finding.js";
+import { severityRank, type FindingCategory, type FindingSeverity } from "./finding.js";
 
 export const configFileCandidates = [
   "gha-security-checks.yml",
@@ -23,7 +23,47 @@ export const defaultOutputFiles = {
   sarif: "security-results.sarif"
 } as const;
 
+const regexSchema = z.string().refine(
+  (value) => {
+    try {
+      new RegExp(value, "gi");
+      return true;
+    } catch {
+      return false;
+    }
+  },
+  { message: "Invalid regular expression" }
+);
+
 const severitySchema = z.enum(["info", "low", "medium", "high", "critical"]);
+
+const defaultSecretPatterns = [
+  {
+    id: "private-key",
+    label: "Private key material",
+    regex: "-----BEGIN (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----",
+    severity: "critical" as const
+  },
+  {
+    id: "github-token",
+    label: "GitHub token",
+    regex: "gh[pousr]_[A-Za-z0-9_]{36,255}",
+    severity: "critical" as const
+  },
+  {
+    id: "aws-access-key",
+    label: "AWS access key",
+    regex: "AKIA[0-9A-Z]{16}",
+    severity: "high" as const
+  },
+  {
+    id: "generic-secret-assignment",
+    label: "Potential secret assignment",
+    regex: "(api[_-]?key|secret|token|password)\\s*[:=]\\s*['\\\"][^'\\\"]{12,}['\\\"]",
+    severity: "medium" as const
+  }
+];
+
 const categorySchema = z.enum([
   "vulnerability",
   "outdated-dependency",
@@ -78,44 +118,24 @@ const configSchema = z.object({
           z.object({
             id: z.string(),
             label: z.string(),
-            regex: z.string(),
+            regex: regexSchema,
             severity: severitySchema.default("high")
           })
         )
-        .default([
-          {
-            id: "private-key",
-            label: "Private key material",
-            regex: "-----BEGIN (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----",
-            severity: "critical"
-          },
-          {
-            id: "github-token",
-            label: "GitHub token",
-            regex: "gh[pousr]_[A-Za-z0-9_]{36,255}",
-            severity: "critical"
-          },
-          {
-            id: "aws-access-key",
-            label: "AWS access key",
-            regex: "AKIA[0-9A-Z]{16}",
-            severity: "high"
-          },
-          {
-            id: "generic-secret-assignment",
-            label: "Potential secret assignment",
-            regex: "(api[_-]?key|secret|token|password)\\s*[:=]\\s*['\\\"][^'\\\"]{12,}['\\\"]",
-            severity: "medium"
-          }
-        ])
+        .default(defaultSecretPatterns)
     })
-    .default({}),
+    .default({
+      maxFileBytes: 1024 * 1024,
+      include: [],
+      exclude: [".git", "node_modules", "vendor", "dist", "dist-action", "coverage"],
+      patterns: defaultSecretPatterns
+    }),
   githubActions: z
     .object({
       workflowDir: z.string().default(".github/workflows"),
       allowUnpinnedOfficialActions: z.boolean().default(true)
     })
-    .default({}),
+    .default({ workflowDir: ".github/workflows", allowUnpinnedOfficialActions: true }),
   tools: z
     .object({
       composer: z.string().default(defaultToolCommands.composer),
@@ -132,7 +152,14 @@ const configSchema = z.object({
       prComment: z.boolean().default(true),
       annotations: z.boolean().default(true)
     })
-    .default({}),
+    .default({
+      json: defaultOutputFiles.json,
+      markdown: defaultOutputFiles.markdown,
+      sarif: defaultOutputFiles.sarif,
+      githubSummary: true,
+      prComment: true,
+      annotations: true
+    }),
   baseline: z.string().optional(),
   suppressions: z
     .array(
@@ -170,6 +197,11 @@ export interface LoadConfigOptions {
 
 export function loadConfig(options: LoadConfigOptions): SecurityCheckConfig {
   const fileConfig = readConfigFile(options.cwd, options.configPath);
+  if (fileConfig.tools !== undefined) {
+    console.warn(
+      "gha-security-checks: the `tools` key in the config file is ignored; tool commands can only be set programmatically."
+    );
+  }
   return configSchema.parse({
     ...fileConfig,
     ...options.overrides,
@@ -197,8 +229,9 @@ export function loadConfig(options: LoadConfigOptions): SecurityCheckConfig {
       ...objectValue(fileConfig.githubActions),
       ...options.overrides?.githubActions
     },
+    // Tool commands are never read from the repository's config file: a pull request could
+    // otherwise point them at an arbitrary executable inside the checked-out code.
     tools: {
-      ...objectValue(fileConfig.tools),
       ...options.overrides?.tools
     },
     outputs: {
@@ -236,8 +269,7 @@ export function shouldFailForSeverity(
   severity: FindingSeverity,
   threshold: FindingSeverity
 ): boolean {
-  const order: FindingSeverity[] = ["info", "low", "medium", "high", "critical"];
-  return order.indexOf(severity) >= order.indexOf(threshold);
+  return severityRank[severity] >= severityRank[threshold];
 }
 
 export function categorySet(categories: FindingCategory[]): Set<FindingCategory> {

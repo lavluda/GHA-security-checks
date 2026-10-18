@@ -18,6 +18,8 @@ export interface FindingLocation {
 
 export interface Finding {
   id: string;
+  /** Stable identifier of the check that produced this finding (shared by all instances). Used as the SARIF rule id. */
+  ruleId?: string;
   title: string;
   description: string;
   category: FindingCategory;

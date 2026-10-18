@@ -1,5 +1,54 @@
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { env } from "node:process";
+
+function git(cwd: string, args: string[]): string {
+  // safe.directory: inside the Docker action the workspace is owned by a different user than root.
+  return execFileSync("git", ["-c", `safe.directory=${cwd}`, ...args], {
+    cwd,
+    stdio: ["ignore", "pipe", "ignore"],
+    timeout: 60_000
+  })
+    .toString()
+    .trim();
+}
+
+function refExists(cwd: string, ref: string): boolean {
+  try {
+    git(cwd, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Branch names starting with "-" would be parsed as git options. */
+function isSafeRefName(name: string): boolean {
+  return name.length > 0 && !name.startsWith("-") && !/[\s\0]/.test(name);
+}
+
+function resolveBase(cwd: string): string {
+  const baseRef = env.GITHUB_BASE_REF;
+  if (baseRef) {
+    if (!isSafeRefName(baseRef)) {
+      throw new Error(`Unsafe base ref: ${baseRef}`);
+    }
+    const remoteRef = `origin/${baseRef}`;
+    if (!refExists(cwd, remoteRef)) {
+      // actions/checkout fetches a single commit by default, so the base branch may be missing.
+      git(cwd, [
+        "fetch",
+        "--no-tags",
+        "--depth=100",
+        "origin",
+        `+refs/heads/${baseRef}:refs/remotes/origin/${baseRef}`
+      ]);
+    }
+    return remoteRef;
+  }
+
+  // Local dev — find the common ancestor with origin/main
+  return git(cwd, ["merge-base", "HEAD", "origin/main"]);
+}
 
 /**
  * Resolves the set of files changed vs the PR base (or origin/main).
@@ -7,28 +56,15 @@ import { env } from "node:process";
  */
 export function getChangedFiles(cwd: string): Set<string> | undefined {
   try {
-    let base: string;
+    const base = resolveBase(cwd);
 
-    const baseRef = env.GITHUB_BASE_REF;
-    if (baseRef) {
-      // Inside a GitHub Actions pull_request event
-      base = `origin/${baseRef}`;
-    } else {
-      // Local dev — find the common ancestor with origin/main
-      base = execSync("git merge-base HEAD origin/main", {
-        cwd,
-        stdio: ["ignore", "pipe", "ignore"]
-      })
-        .toString()
-        .trim();
+    let output: string;
+    try {
+      output = git(cwd, ["diff", "--name-only", `${base}...HEAD`]);
+    } catch {
+      // Shallow history may have no merge base; compare the trees directly instead.
+      output = git(cwd, ["diff", "--name-only", base, "HEAD"]);
     }
-
-    const output = execSync(`git diff --name-only "${base}"...HEAD`, {
-      cwd,
-      stdio: ["ignore", "pipe", "ignore"]
-    })
-      .toString()
-      .trim();
 
     if (!output) return new Set();
 
@@ -38,8 +74,12 @@ export function getChangedFiles(cwd: string): Set<string> | undefined {
         .map((f) => f.trim())
         .filter(Boolean)
     );
-  } catch {
-    // git not available or repo not initialised — fall back to full scan
+  } catch (error) {
+    console.warn(
+      `gha-security-checks: could not determine changed files (${
+        error instanceof Error ? error.message.split("\n")[0] : String(error)
+      }); falling back to a full scan.`
+    );
     return undefined;
   }
 }

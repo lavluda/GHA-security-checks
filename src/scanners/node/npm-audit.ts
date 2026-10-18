@@ -1,6 +1,12 @@
 import { hasFile } from "../../core/filesystem.js";
-import type { Finding } from "../../core/finding.js";
+import { severityRank, type Finding } from "../../core/finding.js";
+import { parseJson } from "../../core/json.js";
 import type { Scanner, ScannerContext } from "../../core/scanner.js";
+import {
+  skippedToolFinding,
+  toolUnavailableFinding,
+  unparsableOutputFinding
+} from "../../core/tooling.js";
 
 interface NpmAuditVulnerability {
   name?: string;
@@ -14,6 +20,14 @@ interface NpmAuditVulnerability {
 
 interface NpmAuditJson {
   vulnerabilities?: Record<string, NpmAuditVulnerability>;
+  error?: { code?: string; summary?: string; detail?: string };
+}
+
+interface NpmAdvisory {
+  title?: string;
+  url?: string;
+  severity?: string;
+  range?: string;
 }
 
 export class NpmAuditScanner implements Scanner {
@@ -42,70 +56,95 @@ export class NpmAuditScanner implements Scanner {
       { cwd: context.cwd }
     );
 
-    if (result.exitCode === 127) {
-      return [
-        {
-          id: "tooling.npm.missing",
-          title: "npm is not available",
-          description: "npm audit was skipped because the configured npm command was not found.",
-          category: "tooling",
-          severity: "info",
-          scanner: this.name,
-          status: "skipped"
-        }
-      ];
+    const unavailable = toolUnavailableFinding(this.name, "tooling.npm.audit", "npm audit", result);
+    if (unavailable) {
+      return [unavailable];
     }
 
     const parsed = parseJson<NpmAuditJson>(result.stdout);
     if (!parsed) {
-      return [];
+      return [unparsableOutputFinding(this.name, "tooling.npm.audit", "npm audit", result)];
+    }
+
+    if (parsed.error) {
+      return [
+        skippedToolFinding(
+          this.name,
+          "tooling.npm.audit.error",
+          "npm audit could not run",
+          parsed.error.summary ?? parsed.error.detail ?? parsed.error.code ?? "npm audit reported an error."
+        )
+      ];
     }
 
     return Object.entries(parsed.vulnerabilities ?? {}).map(([packageName, vulnerability]) => {
-      const advisory = firstAdvisory(vulnerability);
+      const advisories = advisoriesOf(vulnerability);
+      const advisory = advisories[0];
       const fixedVersion = fixedVersionFrom(vulnerability.fixAvailable);
 
-      const reference = advisory?.url ?? vulnerability.url;
+      const references = [
+        ...new Set(
+          [...advisories.map((entry) => entry.url), vulnerability.url].filter(
+            (url): url is string => typeof url === "string"
+          )
+        )
+      ];
 
       return {
         id: `npm.audit.${packageName}`,
+        ruleId: "npm.audit",
         title: advisory?.title ?? vulnerability.title ?? `Vulnerability in ${packageName}`,
-        description: buildDescription(packageName, vulnerability, advisory),
+        description: buildDescription(packageName, vulnerability, advisories),
         category: "vulnerability" as const,
-        severity: normalizeSeverity(advisory?.severity ?? vulnerability.severity),
+        severity: highestSeverity([vulnerability.severity, ...advisories.map((a) => a.severity)]),
         scanner: this.name,
         status: "open" as const,
         packageName: vulnerability.name ?? packageName,
         fixedVersion,
-        references: reference ? [reference] : undefined,
+        references: references.length > 0 ? references : undefined,
         metadata: {
           range: advisory?.range ?? vulnerability.range,
-          fixAvailable: vulnerability.fixAvailable
+          fixAvailable: vulnerability.fixAvailable,
+          advisories: advisories.map((entry) => entry.title).filter(Boolean)
         }
       };
     });
   }
 }
 
-function firstAdvisory(
-  vulnerability: NpmAuditVulnerability
-): { title?: string; url?: string; severity?: string; range?: string } | undefined {
-  return vulnerability.via?.find((entry) => typeof entry === "object") as
-    | { title?: string; url?: string; severity?: string; range?: string }
-    | undefined;
+function advisoriesOf(vulnerability: NpmAuditVulnerability): NpmAdvisory[] {
+  return (vulnerability.via ?? []).filter(
+    (entry): entry is NpmAdvisory => typeof entry === "object" && entry !== null
+  );
 }
 
 function buildDescription(
   packageName: string,
   vulnerability: NpmAuditVulnerability,
-  advisory?: { range?: string }
+  advisories: NpmAdvisory[]
 ): string {
-  const range = advisory?.range ?? vulnerability.range;
+  const range = advisories[0]?.range ?? vulnerability.range;
   const parts = [`npm reported a vulnerability for ${packageName}.`];
   if (range) {
     parts.push(`Affected versions: ${range}.`);
   }
+  const titles = [...new Set(advisories.map((entry) => entry.title).filter(Boolean))];
+  if (titles.length > 1) {
+    parts.push(`Advisories: ${titles.join("; ")}.`);
+  }
   return parts.join(" ");
+}
+
+function highestSeverity(values: Array<string | undefined>): Finding["severity"] {
+  const known = values
+    .filter((value): value is string => typeof value === "string")
+    .map((value) => normalizeSeverity(value));
+  if (known.length === 0) {
+    return "medium";
+  }
+  return known.reduce((best, current) =>
+    severityRank[current] > severityRank[best] ? current : best
+  );
 }
 
 function fixedVersionFrom(value: NpmAuditVulnerability["fixAvailable"]): string | undefined {
@@ -126,12 +165,4 @@ function normalizeSeverity(value?: string): Finding["severity"] {
     return normalized;
   }
   return "medium";
-}
-
-function parseJson<T>(value: string): T | undefined {
-  try {
-    return JSON.parse(value) as T;
-  } catch {
-    return undefined;
-  }
 }

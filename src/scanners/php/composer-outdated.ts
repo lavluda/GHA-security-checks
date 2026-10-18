@@ -1,6 +1,8 @@
 import { hasFile } from "../../core/filesystem.js";
 import type { Finding } from "../../core/finding.js";
+import { parseJson } from "../../core/json.js";
 import type { Scanner, ScannerContext } from "../../core/scanner.js";
+import { toolUnavailableFinding, unparsableOutputFinding } from "../../core/tooling.js";
 
 interface ComposerOutdatedPackage {
   name?: string;
@@ -34,36 +36,38 @@ export class ComposerOutdatedScanner implements Scanner {
       }
     }
 
-    const result = await context.toolRunner.run(
-      context.config.tools.composer,
-      ["outdated", "--format=json", "--no-interaction"],
-      { cwd: context.cwd }
-    );
+    // Without --locked Composer inspects the installed vendor/ directory, which is empty on a fresh checkout.
+    const args = ["outdated", "--format=json", "--no-interaction"];
+    if (hasFile(context.cwd, "composer.lock")) {
+      args.push("--locked");
+    }
 
-    if (result.exitCode === 127) {
-      return [
-        {
-          id: "tooling.composer.missing",
-          title: "Composer is not available",
-          description:
-            "Composer outdated checks were skipped because the configured composer command was not found.",
-          category: "tooling",
-          severity: "info",
-          scanner: this.name,
-          status: "skipped"
-        }
-      ];
+    const result = await context.toolRunner.run(context.config.tools.composer, args, {
+      cwd: context.cwd
+    });
+
+    const unavailable = toolUnavailableFinding(
+      this.name,
+      "tooling.composer.outdated",
+      "Composer outdated",
+      result
+    );
+    if (unavailable) {
+      return [unavailable];
     }
 
     const parsed = parseJson<ComposerOutdatedJson>(result.stdout);
     if (!parsed) {
-      return [];
+      return [
+        unparsableOutputFinding(this.name, "tooling.composer.outdated", "Composer outdated", result)
+      ];
     }
 
     return (parsed.installed ?? [])
       .filter((pkg) => pkg.name && pkg.version && pkg.latest && pkg.version !== pkg.latest)
       .map((pkg) => ({
         id: `composer.outdated.${pkg.name}`,
+        ruleId: "composer.outdated",
         title: `Outdated Composer package: ${pkg.name}`,
         description: `${pkg.name} is installed at ${pkg.version} and latest is ${pkg.latest}.`,
         category: "outdated-dependency" as const,
@@ -89,12 +93,4 @@ function normalizeLatestStatus(status?: string): Finding["severity"] {
     return "medium";
   }
   return "info";
-}
-
-function parseJson<T>(value: string): T | undefined {
-  try {
-    return JSON.parse(value) as T;
-  } catch {
-    return undefined;
-  }
 }

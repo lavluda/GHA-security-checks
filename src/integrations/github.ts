@@ -42,15 +42,18 @@ export async function publishGitHubReport(
   const repo = github.context.repo.repo;
   const issueNumber = pullRequest.number;
 
-  // Find existing comment
-  const comments = await octokit.rest.issues.listComments({
+  // Find our existing comment. The marker alone is not trusted: anyone can paste it into a comment,
+  // so only comments authored by a bot account are considered.
+  const comments = await octokit.paginate(octokit.rest.issues.listComments, {
     owner,
     repo,
     issue_number: issueNumber,
     per_page: 100
   });
 
-  const existing = comments.data.find((comment) => comment.body?.includes(prCommentMarker));
+  const existing = comments.find(
+    (comment) => comment.user?.type === "Bot" && comment.body?.includes(prCommentMarker)
+  );
 
   // Extract previous finding IDs for delta computation
   const previousIds = extractPreviousIds(existing?.body);
@@ -58,7 +61,7 @@ export async function publishGitHubReport(
     result.findings.filter((f) => f.status === "open").map((f) => f.id)
   );
 
-  const body = buildDeltaComment(result, previousIds, currentIds);
+  const body = buildDeltaComment(result, previousIds, currentIds, runUrl());
 
   if (existing) {
     await octokit.rest.issues.updateComment({
@@ -78,10 +81,17 @@ export async function publishGitHubReport(
   });
 }
 
+function runUrl(): string {
+  const { serverUrl, runId } = github.context;
+  const { owner, repo } = github.context.repo;
+  return `${serverUrl}/${owner}/${repo}/actions/runs/${runId}`;
+}
+
 function buildDeltaComment(
   result: ScanResult,
   previousIds: Set<string>,
-  currentIds: Set<string>
+  currentIds: Set<string>,
+  workflowRunUrl: string
 ): string {
   const openFindings = result.findings.filter((f) => f.status === "open");
 
@@ -131,7 +141,7 @@ function buildDeltaComment(
   // Still open (collapsed by default)
   if (stillOpen.length > 0) {
     lines.push(
-      `<details><summary>⚠️ Still open from before this PR (${stillOpen.length})</summary>`
+      `<details><summary>⚠️ Still open from earlier runs (${stillOpen.length})</summary>`
     );
     lines.push("");
     for (const f of stillOpen) {
@@ -150,18 +160,16 @@ function buildDeltaComment(
     }
   }
 
-  if (result.findings.filter((f) => f.status === "suppressed").length > 0) {
-    const baselined = result.findings.filter(
-      (f) => f.status === "suppressed" && f.metadata?.baselined
-    ).length;
-    if (baselined > 0) {
-      lines.push(`<details><summary>🔕 Baselined / suppressed (${baselined})</summary>`);
-      lines.push("");
-      lines.push("These findings were present when the baseline was created and are not shown.");
-      lines.push("");
-      lines.push("</details>");
-      lines.push("");
-    }
+  const suppressedCount = result.findings.filter((f) => f.status === "suppressed").length;
+  if (suppressedCount > 0) {
+    lines.push(`<details><summary>🔕 Baselined / suppressed (${suppressedCount})</summary>`);
+    lines.push("");
+    lines.push(
+      "These findings are covered by the baseline or by a configured suppression and are not shown."
+    );
+    lines.push("");
+    lines.push("</details>");
+    lines.push("");
   }
 
   // Embed current IDs for next run's delta
@@ -178,7 +186,7 @@ function buildDeltaComment(
       "",
       `**Mode:** ${result.mode} · **Status:** ${result.failed ? "❌ failed" : "✅ passed"} · **Total findings:** ${result.summary.total}`,
       "",
-      "> ⚠️ Full report truncated (exceeded 60KB). See the [job summary]($SUMMARY_URL) for details.",
+      `> ⚠️ Full report truncated (exceeded 60KB). See the [workflow run](${workflowRunUrl}) for the full report.`,
       "",
       `${idDataPrefix}${idsJson}${idDataSuffix}`
     ].join("\n");
@@ -230,14 +238,10 @@ function annotateFindings(findings: Finding[], useErrorAnnotations: boolean): vo
 
     const message = `${finding.title}: ${finding.description}`;
 
-    if (
-      useErrorAnnotations &&
-      (finding.severity === "critical" || finding.severity === "high")
-    ) {
+    const severe = finding.severity === "critical" || finding.severity === "high";
+    if (severe && useErrorAnnotations) {
       core.error(message, annotation);
-    } else if (finding.severity === "medium" || finding.severity === "low") {
-      core.warning(message, annotation);
-    } else if (finding.severity === "critical" || finding.severity === "high") {
+    } else if (severe || finding.severity === "medium" || finding.severity === "low") {
       core.warning(message, annotation);
     } else {
       core.notice(message, annotation);

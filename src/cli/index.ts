@@ -3,6 +3,7 @@ import { Command } from "commander";
 import { runSecurityCheck, type PolicyMode } from "../index.js";
 import { VERSION, COMMIT } from "../core/version.js";
 import { saveBaseline } from "../core/baseline.js";
+import { loadConfig } from "../core/config.js";
 import { addSuppression, listSuppressions, removeSuppression } from "../core/config-editor.js";
 
 const program = new Command();
@@ -70,18 +71,27 @@ baselineCmd
   )
   .option("-c, --config <path>", "Path to a security check config file")
   .option("--cwd <path>", "Repository root to scan", process.cwd())
-  .option("--file <path>", "Baseline file path", "security-baseline.json")
+  .option("--file <path>", "Baseline file path (defaults to the config's `baseline`, else security-baseline.json)")
   .action(async (options) => {
     const { result } = await runSecurityCheck({
       cwd: options.cwd,
       configPath: options.config,
-      overrides: { mode: "audit", outputs: { json: false, markdown: false, sarif: false } }
+      // Disable the existing baseline so previously baselined findings are re-recorded, not dropped.
+      overrides: {
+        mode: "audit",
+        baseline: undefined,
+        outputs: { json: false, markdown: false, sarif: false }
+      }
     });
 
-    saveBaseline(options.cwd, options.file, result.findings);
+    const file: string =
+      options.file ??
+      loadConfig({ cwd: options.cwd, configPath: options.config }).baseline ??
+      "security-baseline.json";
+    saveBaseline(options.cwd, file, result.findings);
 
     const openCount = result.findings.filter((f) => f.status === "open").length;
-    console.log(`Baseline written to ${options.file} — ${openCount} finding(s) suppressed.`);
+    console.log(`Baseline written to ${file} — ${openCount} finding(s) suppressed.`);
     console.log("Future runs will only surface findings introduced after this baseline.");
   });
 
@@ -121,10 +131,17 @@ program
   .option("-c, --config <path>", "Path to the config file to modify")
   .option("--cwd <path>", "Repository root", process.cwd())
   .option("--reason <reason>", "Human-readable reason for suppression")
+  .option("--category <category>", "Suppress all findings of this category instead")
+  .option("--path <path>", "Suppress findings at this file path only")
   .action((id, options) => {
     const filePath = addSuppression(
       options.cwd,
-      { id, reason: options.reason },
+      {
+        id: options.category ? undefined : id,
+        category: options.category,
+        path: options.path,
+        reason: options.reason
+      },
       options.config
     );
     console.log(`Suppression added to ${filePath}`);

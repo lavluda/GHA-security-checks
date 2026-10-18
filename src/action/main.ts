@@ -1,5 +1,6 @@
 import * as core from "@actions/core";
 import { runSecurityCheck, type PolicyMode } from "../index.js";
+import { evaluatePolicy } from "../core/policy-engine.js";
 import { publishGitHubReport } from "../integrations/github.js";
 import { VERSION, COMMIT } from "../core/version.js";
 
@@ -27,21 +28,31 @@ async function main(): Promise<void> {
     }
   });
 
-  await publishGitHubReport(result, {
-    token,
-    prComment: config.outputs.prComment,
-    jobSummary: config.outputs.githubSummary,
-    annotations: config.outputs.annotations
-  });
-
   core.setOutput("failed", String(result.failed));
   core.setOutput("findings", String(result.summary.total));
   core.setOutput("json-report", reports.json ?? "");
   core.setOutput("markdown-report", reports.markdown ?? "");
   core.setOutput("sarif-report", reports.sarif ?? "");
 
+  // Reporting is best effort: a read-only token (e.g. on fork PRs) must not fail the audit itself.
+  try {
+    await publishGitHubReport(result, {
+      token,
+      prComment: config.outputs.prComment,
+      jobSummary: config.outputs.githubSummary,
+      annotations: config.outputs.annotations
+    });
+  } catch (error) {
+    core.warning(
+      `Could not publish the GitHub report: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+
   if (result.failed) {
-    core.setFailed(`Security policy failed with ${result.summary.total} finding(s).`);
+    const blocking = evaluatePolicy(result.findings, config).blockingFindings.length;
+    core.setFailed(
+      `Security policy failed: ${blocking} blocking finding(s) of ${result.summary.total} total.`
+    );
   }
 }
 

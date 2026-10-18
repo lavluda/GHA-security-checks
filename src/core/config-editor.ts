@@ -50,18 +50,12 @@ export function addSuppression(
   const filePath = resolveConfigPath(cwd, configPath);
   const doc = readDocument(filePath);
 
-  // Ensure suppressions key exists as a sequence
-  if (!doc.has("suppressions")) {
-    doc.set("suppressions", []);
+  // Ensure suppressions key exists as a YAML sequence node (a plain array is not editable in place)
+  if (!YAML.isSeq(doc.get("suppressions"))) {
+    doc.set("suppressions", doc.createNode([]));
   }
 
-  const suppressions = doc.get("suppressions");
-  if (!YAML.isSeq(suppressions)) {
-    doc.set("suppressions", []);
-  }
-
-  const seq = doc.get("suppressions") as YAML.YAMLSeq;
-  seq.add(entry);
+  doc.addIn(["suppressions"], doc.createNode(entry));
 
   writeFileSync(filePath, doc.toString(), "utf8");
   return filePath;

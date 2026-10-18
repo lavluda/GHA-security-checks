@@ -49,19 +49,48 @@ export function listFiles(options: WalkOptions): string[] {
 }
 
 export function listWorkflowFiles(root: string, workflowDir: string): string[] {
-  const absolute = join(root, workflowDir);
+  const dir = workflowDir.replace(/\\/g, "/").replace(/\/+$/, "");
+  const absolute = join(root, dir);
   if (!existsSync(absolute)) {
     return [];
   }
 
   return listFiles({
-    root,
+    root: absolute,
     exclude: [],
     maxFileBytes: 512 * 1024
-  }).filter((file) => {
-    if (!file.startsWith(`${workflowDir}/`)) {
-      return false;
+  })
+    .map((file) => `${dir}/${file.replace(/\\/g, "/")}`)
+    .filter((file) => file.endsWith(".yml") || file.endsWith(".yaml"));
+}
+
+/** Converts a glob (`**`, `*`, `?`) to a RegExp that matches repo-relative, forward-slash paths. */
+export function globToRegExp(glob: string): RegExp {
+  let source = "";
+  for (let i = 0; i < glob.length; i += 1) {
+    const char = glob[i] as string;
+    if (char === "*") {
+      if (glob[i + 1] === "*") {
+        i += 1;
+        if (glob[i + 1] === "/") {
+          i += 1;
+          source += "(?:.*/)?";
+        } else {
+          source += ".*";
+        }
+      } else {
+        source += "[^/]*";
+      }
+    } else if (char === "?") {
+      source += "[^/]";
+    } else {
+      source += char.replace(/[.+^${}()|[\]\\]/g, "\\$&");
     }
-    return file.endsWith(".yml") || file.endsWith(".yaml");
-  });
+  }
+  return new RegExp(`^${source}$`);
+}
+
+export function matchesAnyGlob(file: string, globs: string[]): boolean {
+  const normalized = file.replace(/\\/g, "/");
+  return globs.some((glob) => globToRegExp(glob).test(normalized));
 }
